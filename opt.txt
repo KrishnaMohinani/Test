@@ -1,0 +1,219 @@
+import pulp
+import pickle
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import time
+from functools import wraps
+
+class Optimiser():
+    
+    def __init__(self):
+        self.model = pulp.LpProblem(name = 'Stability_solution', sense = pulp.LpMinimize)
+        print("Model initialised\n")
+        
+    def timeit(func):
+        @wraps(func)
+        def timeit_wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+            result = func(*args, **kwargs)
+            end_time = time.perf_counter()
+            total_time = end_time - start_time
+            print(f'Function {func.__name__} took {total_time:.1f} seconds')
+            return result
+        return timeit_wrapper
+    
+    def load_pickle_data(self, pickle_path):
+        
+        with open(pickle_path, 'rb') as f:
+            data = pickle.load(f)
+    
+        self.scenario_data = data['scenario_data']
+        self.BM_counterfactual_data = data['BM counterfactual']
+        self.providers_data = data['provider data']
+        
+        print(f'Pickle data loaded from {pickle_path}\n')
+        print(f'{self.scenario_data.shape[0]} scenarios of length {self.scenario_data.shape[1]}')
+        print(f'{len(self.providers_data)} providers loaded')
+        
+    def init_scenario(self, scen_number):
+        
+        def plot_scenario(plot_data):
+            plt.figure(figsize = (10,6))
+            plt.title('Random walk inertia data simulation')
+            plt.xlabel('Time steps')
+            plt.ylabel('Inertia requirement')
+            plt.grid(True)
+            plt.plot(plot_data)
+            plt.show()
+        
+        if scen_number in range(self.scenario_data.shape[0]):
+            self.active_scenario = self.scenario_data[scen_number]
+            self.active_BM_counterfactual = self.BM_counterfactual_data[scen_number]
+            
+            plot_scenario(self.active_scenario)
+            print(f'Scenario {scen_number} and BM data loaded with length {len(self.active_scenario)}')
+            print(f'Highest requirement = {min(self.active_scenario):.1f}')
+            print(f'Lowest requirement = {max(self.active_scenario):.1f}\n')
+            
+        elif scen_number == 'all':
+            self.active_scenario = self.scenario_data.flatten()
+                
+            self.active_BM_counterfactual = []
+            for row in self.BM_counterfactual_data:
+                self.active_BM_counterfactual += row
+                
+            plot_scenario(self.active_scenario)             
+            print(f'All scenarios and BM data loaded with length {len(self.active_scenario)}')
+            print(f'Highest requirement = {min(self.active_scenario):.1f}')
+            print(f'Lowest requirement = {max(self.active_scenario):.1f}')
+            
+        else:
+            print(f'Scenario number not recognised (must be between 0 and {self.scenario_data.shape[0]} or "all"')
+    
+    def init_optimiser_variables(self):
+        #Set up 'Unit picked' variable
+        self.Providers_Avail = pulp.LpVariable.dicts("Avail",
+                                            self.providers_data.index,
+                                            cat = 'Binary')
+        print(f'Providers availability variables initialised for {len(self.Providers_Avail)} providers')
+        
+        self.Providers_Util = []
+        self.BM_alternative_Var = []
+        
+        for i in range(len(self.active_scenario)):
+            self.Providers_Util.append(pulp.LpVariable.dicts(f"Util_HH{i}",
+                                            self.providers_data.index,
+                                            cat = 'Binary'))
+            
+            #BM Util
+            BM_HH_Vars = []
+            if len(self.active_BM_counterfactual[i]) > 0:
+                for j in range(len(self.active_BM_counterfactual[i])):
+                    BM_HH_Vars.append(pulp.LpVariable(f"BM_HH{i}_No{j}", cat = 'Binary'))
+            self.BM_alternative_Var.append(BM_HH_Vars)
+        print(f'Providers utilisation variables initialised for {len(self.Providers_Util)} time segments')
+        print(f'BM utilisation variables initialised for {len(self.BM_alternative_Var)} time segments')
+        
+    def init_constraints(self):
+        #Provider Util constraint
+        for i in range(len(self.active_scenario)):
+            for provider in self.providers_data.index:
+                Avail_Util_constraint = (self.Providers_Avail[provider] >= self.Providers_Util[i][provider])
+                self.model += (Avail_Util_constraint)
+        print(f'Provider utilisation constraints added')
+
+        #HH Inertia Constraints
+        for i in range(len(self.active_scenario)):
+            
+            #shortfall
+            inertia_shortfall = -self.active_scenario[i]
+            #Provider HH vars
+            Prov_HH = pulp.lpSum([self.Providers_Util[i][Name] * self.providers_data.loc[Name]['Capacity'] for Name in self.providers_data.index])
+            
+            #BM HH vars
+            if len(self.BM_alternative_Var[i]) == 1:
+                BM_HH = pulp.lpSum(self.BM_alternative_Var[i][0] * self.active_BM_counterfactual[i][0][0])
+            elif len(self.BM_alternative_Var[i]) > 1:
+                BM_HH = pulp.lpSum(self.BM_alternative_Var[i][j] * self.active_BM_counterfactual[i][j][0] for j in range(len(self.BM_alternative_Var[i])))
+            else:
+                continue
+            #Combined
+            self.model += (Prov_HH + BM_HH >= inertia_shortfall)
+        print(f'Time step inertia constraints added')
+            
+    def add_capacity_constraint(self, cap):
+        self.model += (pulp.lpSum([self.Providers_Avail[Name] * self.providers_data.loc[Name]['Capacity'] for Name in self.providers_data.index]) <= cap, 'main') 
+        print(f'Capacity constraint added : {cap:.1f}')
+        
+    def remove_capacity_constraint(self):
+        if 'main' in self.model.constraints:
+            self.model.constraints.pop('main')
+            print('Capacity constraint removed')
+        
+    def init_objective_func(self):
+        #Objective function
+        Util_sum = pulp.lpSum([self.Providers_Util[i][Name] * self.providers_data.loc[Name]['Utilisation'] for Name in self.providers_data.index for i in range(len(self.active_scenario))])
+        Avail_sum = pulp.lpSum([self.Providers_Avail[Name] * self.providers_data.loc[Name]['Availability'] * len(self.active_scenario) for Name in self.providers_data.index])
+        BM_sum = pulp.lpSum(self.BM_alternative_Var[i][j] * self.active_BM_counterfactual[i][j][1] for i in range(len(self.active_scenario)) for j in range(len(self.BM_alternative_Var[i])))
+
+        self.model += Util_sum + Avail_sum + BM_sum
+        
+        print('Objective function added')
+    
+    @timeit    
+    def solve_model(self):
+        solv = pulp.PULP_CBC_CMD(msg = True, warmStart=True)
+        self.model.solve(solv)
+        print(self.model.status)
+        
+    def model_results(self, plot):
+        var_results = []
+        for prov in self.Providers_Avail.keys():
+            var_results.append(int(self.Providers_Avail[prov].varValue))
+            providers_res = self.providers_data.copy()
+        providers_res['Result'] = var_results
+        providers_res['Util'] = 0
+
+        for prov in providers_res.index:
+            Util = 0
+            for i in range(len(self.active_scenario)):
+                Util += self.Providers_Util[i][prov].varValue
+            providers_res.loc[prov, 'Util'] = Util
+
+        providers_res['Util'] = providers_res['Util'].astype(int)
+        providers_res = providers_res[providers_res['Result'] == 1]
+        Res = int(self.model.objective.value())
+        Cap = providers_res[providers_res['Result'] == 1]['Capacity'].sum()
+        display(f"{Res:,} cost, {Cap:0.2f} cap")
+        display(providers_res)
+        
+        BM_HH_used = 0
+
+        for i in range(len(self.BM_alternative_Var)):
+            for j in range(len(self.BM_alternative_Var[i])):
+                BM_HH_used += self.BM_alternative_Var[i][j].varValue
+                
+        display(f"HH BM actions used {int(BM_HH_used)}")
+        
+        if plot == 'yes':
+            plt.figure(figsize = (10,6))
+            plt.xlabel('Time steps')
+            plt.ylabel('Inertia requirement')
+            plt.grid(True)
+            plt.plot(self.active_scenario)
+            
+            for i in range(len(self.active_scenario)):
+                cumulative_height = 0
+                for key in self.Providers_Util[i]:
+                    if self.Providers_Util[i][key].varValue > 0:
+                        h = self.providers_data.loc[key, 'Capacity']
+                        plt.bar(i, height = -h, bottom = cumulative_height)
+                        cumulative_height -= h
+            
+            plt.show()
+
+        
+    def single_solve(self, scenario, constraint):
+        
+        self.init_scenario(scenario)
+        self.init_optimiser_variables()
+        self.init_constraints()
+        self.add_capacity_constraint(constraint)
+        self.init_objective_func()
+        self.solve_model()
+        self.model_results('yes')
+        
+        
+    def multiple_solves(self, scenario, start, end, step):
+        self.init_scenario(scenario)
+        self.init_optimiser_variables()
+        self.init_constraints()
+        self.init_objective_func()
+        
+        for cap in np.arange(start, end, step):
+            self.remove_capacity_constraint()
+            self.add_capacity_constraint(cap)
+            
+            self.solve_model()
+            self.model_results('yes')
