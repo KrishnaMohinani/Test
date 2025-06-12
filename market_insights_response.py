@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 def fetch_and_process_data():
     # Load data from URLs
-    dynamic_url = "https://api.nationalgrideso.com/datastore/dump/596f29ac-0387-4ba4-a6d3-95c243140707"
+    dynamic_url = "https://api.neso.energy/datastore/dump/596f29ac-0387-4ba4-a6d3-95c243140707"
     dynamic = pd.read_csv(dynamic_url, index_col=4, parse_dates=True, storage_options={'User-Agent': 'Mozilla/5.0'})
     dynamic.index = dynamic.index.strftime('%Y-%m-%d')
     dynamic.index = pd.to_datetime(dynamic.index)
@@ -20,7 +20,7 @@ def fetch_and_process_data():
     dynamic_pt_price = pd.pivot_table(dynamic, index=[dynamic.index, 'auctionProduct'], columns='EFA', values='clearingPrice')
     dynamic_pt_price.columns = [int(float(col)) for col in dynamic_pt_price.columns]
 
-    req_url = 'https://api.nationalgrideso.com/datastore/dump/1cf68f59-8eb8-4f1d-bccf-11b5a47b24e5'
+    req_url = 'https://api.neso.energy/datastore/dump/1cf68f59-8eb8-4f1d-bccf-11b5a47b24e5'
     dynamic_req = pd.read_csv(req_url, index_col=5, parse_dates=True, storage_options={'User-Agent': 'Mozilla/5.0'})
     dynamic_req = dynamic_req[dynamic_req['auctionProduct'].isin(['DCH', 'DCL', 'DMH', 'DML', 'DRH', 'DRL'])]
     dynamic_req.index = dynamic_req.index.strftime('%Y-%m-%d')
